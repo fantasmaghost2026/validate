@@ -33,6 +33,7 @@ interface GeneratedLicense {
   licCodeData: {
     id: number
     code: string
+    qty: number
   }
   expirationInfo: {
     expirationDate: string
@@ -333,20 +334,21 @@ WHERE id = ${licInfoData.id};`
   }
 
   const generateLicCodeSQL = (license: GeneratedLicense) => {
-    const { licCodeData, licInfoData } = license
+    const { licCodeData } = license
     return `-- ============================================
 -- SQL para tabla lic_code (Codigo de Actualizacion)
 -- Generado: ${new Date().toISOString()}
--- Dias: ${licInfoData.qty}
+-- Dias: ${licCodeData.qty}
 -- ============================================
 
 -- INSERTAR nuevo codigo
-INSERT INTO lic_code (id, code)
-VALUES (${licCodeData.id}, '${licCodeData.code}');
+INSERT INTO lic_code (id, code, qty)
+VALUES (${licCodeData.id}, '${licCodeData.code}', ${licCodeData.qty});
 
 -- ACTUALIZAR codigo existente (alternativa)
 UPDATE lic_code SET
   code = '${licCodeData.code}',
+  qty = ${licCodeData.qty},
   updated_at = CURRENT_TIMESTAMP
 WHERE id = ${licCodeData.id};`
   }
@@ -387,10 +389,11 @@ ON DUPLICATE KEY UPDATE
 -- =====================
 -- TABLA: lic_code
 -- =====================
-INSERT INTO lic_code (id, code)
-VALUES (${licCodeData.id}, '${licCodeData.code}')
+INSERT INTO lic_code (id, code, qty)
+VALUES (${licCodeData.id}, '${licCodeData.code}', ${licCodeData.qty})
 ON DUPLICATE KEY UPDATE
-  code = VALUES(code);`
+  code = VALUES(code),
+  qty = VALUES(qty);`
   }
 
   return (
