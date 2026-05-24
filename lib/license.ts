@@ -5,6 +5,15 @@ export interface LicenseData {
   ownerName: string
   validityDays: number
   activationDate: string
+  // Para renovaciones: si es true, la fecha de activacion sera "hoy"
+  isRenewal?: boolean
+}
+
+export interface RenewalData {
+  licenseId: string
+  ownerName: string
+  newValidityDays: number
+  // La fecha de activacion siempre sera "hoy" para renovaciones
 }
 
 export interface GeneratedLicense {
@@ -649,4 +658,96 @@ ON DUPLICATE KEY UPDATE
     licCode: licCodeSQL,
     combined: combinedSQL
   }
+}
+
+/**
+ * RENOVAR LICENCIA
+ * Al renovar, la fecha de activacion (init) SIEMPRE es "hoy"
+ * Esto es CRITICO para que el calculo PHP funcione correctamente:
+ * 
+ * PHP calcula: dias_restantes = qty - dias_desde_init
+ * Si init = hoy, entonces: dias_restantes = qty - 0 = qty
+ * 
+ * IMPORTANTE: El codigo de actualizacion (lic_code) contiene los nuevos dias
+ * y al aplicarlo, DEBE actualizarse tanto qty como init en lic_info
+ */
+export async function renewLicense(data: RenewalData): Promise<GeneratedLicense> {
+  const today = getTodayDate()
+  
+  return generateLicense({
+    licenseId: data.licenseId,
+    ownerName: data.ownerName,
+    validityDays: data.newValidityDays,
+    activationDate: today, // SIEMPRE usa la fecha de hoy para renovaciones
+    isRenewal: true
+  })
+}
+
+/**
+ * Genera SQL especifico para RENOVAR una licencia existente
+ * Este SQL actualiza tanto lic_info como lic_code
+ * 
+ * IMPORTANTE: Al renovar SIEMPRE se actualiza:
+ * 1. init = fecha_actual (para resetear el contador de dias)
+ * 2. qty = nuevos_dias_de_validez
+ * 3. string = nuevo_hash (para la nueva combinacion fecha-dias-nombre)
+ */
+export function generateRenewalSQL(license: GeneratedLicense): string {
+  const { licInfoData, licCodeData, expirationInfo, phpVerification } = license
+  const escapedOwner = licInfoData.owner.replace(/'/g, "''")
+  const timestamp = new Date().toISOString()
+  
+  return `-- ============================================
+-- SQL DE RENOVACION - BITSELL POS License System
+-- Generado: ${timestamp}
+-- ============================================
+-- License ID: ${licInfoData.license_id}
+-- Owner: ${escapedOwner}
+-- NUEVA Activacion: ${licInfoData.init} (FECHA ACTUAL - RESETEA CONTADOR)
+-- Validez: ${licInfoData.qty} dias (${expirationInfo.formattedValidity})
+-- Expira: ${expirationInfo.expirationDate}
+-- ============================================
+-- VERIFICACION PHP:
+-- lic_info: password_verify("${phpVerification.licInfoValidationString}", $hash)
+-- lic_code: password_verify("${phpVerification.licCodeValidationString}", $hash)
+-- ============================================
+-- 
+-- IMPORTANTE: Este SQL RENUEVA una licencia existente
+-- - init se actualiza a HOY para resetear el contador de dias
+-- - qty contiene los NUEVOS dias de validez (no se suman a los anteriores)
+-- - El calculo PHP: dias_restantes = qty - dias_desde_init
+--   Con init = hoy: dias_restantes = ${licInfoData.qty} - 0 = ${licInfoData.qty}
+--
+-- ============================================
+
+-- =====================
+-- ACTUALIZAR TABLA: lic_info
+-- =====================
+UPDATE lic_info SET
+  init = '${licInfoData.init}',           -- FECHA ACTUAL (resetea contador)
+  qty = ${licInfoData.qty},               -- NUEVOS dias de validez
+  owner = '${escapedOwner}',
+  string = '${licInfoData.string}',       -- NUEVO hash
+  license_id = '${licInfoData.license_id}',
+  updated_at = CURRENT_TIMESTAMP
+WHERE id = ${licInfoData.id};
+
+-- =====================
+-- ACTUALIZAR TABLA: lic_code
+-- =====================
+UPDATE lic_code SET
+  code = '${licCodeData.code}',           -- NUEVO hash del codigo
+  qty = ${licCodeData.qty},               -- NUEVOS dias
+  license_id = '${licCodeData.license_id}',
+  updated_at = CURRENT_TIMESTAMP
+WHERE id = ${licCodeData.id};
+
+-- ============================================
+-- VERIFICAR RESULTADO (opcional)
+-- ============================================
+-- SELECT 
+--   id, init, qty, owner, license_id,
+--   DATEDIFF(CURDATE(), init) as dias_transcurridos,
+--   qty - DATEDIFF(CURDATE(), init) as dias_restantes
+-- FROM lic_info WHERE id = ${licInfoData.id};`
 }

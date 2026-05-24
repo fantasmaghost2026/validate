@@ -204,7 +204,10 @@ export default function LicenseGenerator() {
   const [isGenerating, setIsGenerating] = useState(false)
   const [generateError, setGenerateError] = useState<string | null>(null)
   const [showPresets, setShowPresets] = useState(false)
-  const [sqlTab, setSqlTab] = useState<"combined" | "licInfo" | "licCode">("combined")
+  const [sqlTab, setSqlTab] = useState<"combined" | "licInfo" | "licCode" | "renewal">("combined")
+  
+  // Estado para modo de operacion
+  const [operationMode, setOperationMode] = useState<"new" | "renewal">("new")
 
   // Estado para validacion
   const [licenseKeyToValidate, setLicenseKeyToValidate] = useState("")
@@ -415,6 +418,65 @@ ON DUPLICATE KEY UPDATE
   license_id = VALUES(license_id);`
   }
 
+  // SQL especifico para RENOVACIONES
+  const generateRenewalSQL = (license: GeneratedLicense) => {
+    const { licInfoData, licCodeData, expirationInfo, phpVerification } = license
+    const escapedOwner = licInfoData.owner.replace(/'/g, "''")
+    return `-- ============================================
+-- SQL DE RENOVACION - BITSELL POS License System
+-- ============================================
+-- Generado: ${new Date().toISOString()}
+-- License ID: ${licInfoData.license_id}
+-- Owner: ${escapedOwner}
+-- NUEVA Activacion: ${licInfoData.init} (HOY - RESETEA CONTADOR)
+-- Validez: ${licInfoData.qty} dias (${expirationInfo.formattedValidity})
+-- Expira: ${expirationInfo.expirationDate}
+-- ============================================
+-- VERIFICACION PHP:
+-- lic_info: password_verify("${phpVerification?.licInfoValidationString || `${licInfoData.init}-${licInfoData.qty}-${licInfoData.owner}`}", $hash)
+-- lic_code: password_verify("${phpVerification?.licCodeValidationString || `${licCodeData.license_id}-${licCodeData.qty}`}", $hash)
+-- ============================================
+--
+-- IMPORTANTE: Este SQL RENUEVA una licencia existente
+-- - init se actualiza a HOY para resetear el contador de dias
+-- - qty contiene los NUEVOS dias de validez
+-- - El calculo PHP: dias_restantes = qty - dias_desde_init
+--   Con init = hoy: dias_restantes = ${licInfoData.qty} - 0 = ${licInfoData.qty}
+--
+-- ============================================
+
+-- =====================
+-- ACTUALIZAR TABLA: lic_info
+-- =====================
+UPDATE lic_info SET
+  init = '${licInfoData.init}',           -- FECHA HOY (resetea contador)
+  qty = ${licInfoData.qty},               -- NUEVOS dias de validez
+  owner = '${escapedOwner}',
+  string = '${licInfoData.string}',       -- NUEVO hash
+  license_id = '${licInfoData.license_id}',
+  updated_at = CURRENT_TIMESTAMP
+WHERE id = ${licInfoData.id};
+
+-- =====================
+-- ACTUALIZAR TABLA: lic_code
+-- =====================
+UPDATE lic_code SET
+  code = '${licCodeData.code}',           -- NUEVO hash del codigo
+  qty = ${licCodeData.qty},               -- NUEVOS dias
+  license_id = '${licCodeData.license_id}',
+  updated_at = CURRENT_TIMESTAMP
+WHERE id = ${licCodeData.id};
+
+-- ============================================
+-- VERIFICAR RESULTADO (ejecutar despues)
+-- ============================================
+-- SELECT 
+--   id, init, qty, owner, license_id,
+--   DATEDIFF(CURDATE(), init) as dias_transcurridos,
+--   qty - DATEDIFF(CURDATE(), init) as dias_restantes
+-- FROM lic_info WHERE id = ${licInfoData.id};`
+  }
+
   return (
     <div className="min-h-screen bg-background text-foreground relative overflow-hidden">
       {/* Matrix Rain Background */}
@@ -475,6 +537,47 @@ ON DUPLICATE KEY UPDATE
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
+                  {/* Modo de operacion */}
+                  <div className="space-y-2">
+                    <Label className="flex items-center gap-2 font-mono text-sm">
+                      <RefreshCw className="h-4 w-4 text-primary" />
+                      OPERATION_MODE
+                    </Label>
+                    <div className="flex gap-2">
+                      <Button
+                        type="button"
+                        variant={operationMode === "new" ? "default" : "outline"}
+                        onClick={() => {
+                          setOperationMode("new")
+                          setActivationDate(new Date().toISOString().split("T")[0])
+                        }}
+                        className={`flex-1 font-mono ${operationMode === "new" ? "bg-primary text-background" : "hacker-border"}`}
+                      >
+                        <Key className="h-4 w-4 mr-2" />
+                        NUEVA LICENCIA
+                      </Button>
+                      <Button
+                        type="button"
+                        variant={operationMode === "renewal" ? "default" : "outline"}
+                        onClick={() => {
+                          setOperationMode("renewal")
+                          // En modo renovacion, la fecha es siempre HOY
+                          setActivationDate(new Date().toISOString().split("T")[0])
+                        }}
+                        className={`flex-1 font-mono ${operationMode === "renewal" ? "bg-yellow-500 text-background" : "hacker-border"}`}
+                      >
+                        <RefreshCw className="h-4 w-4 mr-2" />
+                        RENOVAR
+                      </Button>
+                    </div>
+                    <p className="text-xs text-muted-foreground font-mono">
+                      {operationMode === "new" 
+                        ? "// Nueva licencia - Puedes elegir fecha de activacion"
+                        : "// Renovacion - La fecha de activacion sera HOY (resetea contador)"
+                      }
+                    </p>
+                  </div>
+
                   {/* License ID */}
                   <div className="space-y-2">
                     <Label htmlFor="licenseId" className="flex items-center gap-2 font-mono text-sm">
@@ -507,20 +610,33 @@ ON DUPLICATE KEY UPDATE
                     <p className="text-xs text-muted-foreground font-mono">{"// Nombre del propietario/negocio"}</p>
                   </div>
 
-                  {/* Activation Date */}
+                  {/* Activation Date - Solo editable en modo "new" */}
                   <div className="space-y-2">
                     <Label htmlFor="activationDate" className="flex items-center gap-2 font-mono text-sm">
                       <Calendar className="h-4 w-4 text-primary" />
                       ACTIVATION_DATE
+                      {operationMode === "renewal" && (
+                        <Badge variant="outline" className="ml-2 text-yellow-500 border-yellow-500">
+                          AUTO: HOY
+                        </Badge>
+                      )}
                     </Label>
                     <Input
                       id="activationDate"
                       type="date"
                       value={activationDate}
                       onChange={(e) => setActivationDate(e.target.value)}
-                      className="font-mono bg-background/50 hacker-border focus:ring-primary"
+                      disabled={operationMode === "renewal"}
+                      className={`font-mono bg-background/50 hacker-border focus:ring-primary ${
+                        operationMode === "renewal" ? "opacity-70 cursor-not-allowed" : ""
+                      }`}
                     />
-                    <p className="text-xs text-muted-foreground font-mono">{"// Fecha de inicio de la licencia"}</p>
+                    <p className="text-xs text-muted-foreground font-mono">
+                      {operationMode === "renewal" 
+                        ? "// RENOVACION: Fecha fija a HOY para resetear contador de dias"
+                        : "// Fecha de inicio de la licencia"
+                      }
+                    </p>
                   </div>
 
                   {/* Validity Days */}
@@ -744,6 +860,15 @@ ON DUPLICATE KEY UPDATE
                           >
                             lic_code
                           </Button>
+                          <Button 
+                            variant={sqlTab === "renewal" ? "default" : "ghost"}
+                            size="sm"
+                            onClick={() => setSqlTab("renewal")}
+                            className="font-mono text-xs flex-1 text-yellow-500"
+                          >
+                            <RefreshCw className="h-3 w-3 mr-1" />
+                            RENOVAR
+                          </Button>
                         </div>
 
                         <div className="relative">
@@ -754,7 +879,9 @@ ON DUPLICATE KEY UPDATE
                                 ? generateCombinedSQL(generatedLicense)
                                 : sqlTab === "licInfo"
                                   ? generateLicInfoSQL(generatedLicense)
-                                  : generateLicCodeSQL(generatedLicense)
+                                  : sqlTab === "licCode"
+                                    ? generateLicCodeSQL(generatedLicense)
+                                    : generateRenewalSQL(generatedLicense)
                             }
                             className="font-mono text-xs h-48 bg-background/50 hacker-border text-muted-foreground resize-none"
                           />
@@ -766,7 +893,9 @@ ON DUPLICATE KEY UPDATE
                                 ? generateCombinedSQL(generatedLicense)
                                 : sqlTab === "licInfo"
                                   ? generateLicInfoSQL(generatedLicense)
-                                  : generateLicCodeSQL(generatedLicense),
+                                  : sqlTab === "licCode"
+                                    ? generateLicCodeSQL(generatedLicense)
+                                    : generateRenewalSQL(generatedLicense),
                               "SQL"
                             )}
                             className="absolute top-2 right-2 h-8 px-2 hover:bg-primary/20"
