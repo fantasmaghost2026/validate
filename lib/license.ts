@@ -32,11 +32,12 @@ export interface GeneratedLicense {
     license_id: string
   }
   
-  // Datos para la tabla lic_code
+  // Datos para la tabla lic_code (vinculado con lic_info)
   licCodeData: {
     id: number
     code: string
     qty: number
+    license_id: string
   }
   
   // Informacion de expiracion
@@ -47,6 +48,14 @@ export interface GeneratedLicense {
     daysFromToday: number
     isActiveFromToday: boolean
     formattedValidity: string
+  }
+  
+  // Datos para verificacion PHP
+  phpVerification: {
+    licInfoValidationString: string
+    licCodeValidationString: string
+    phpCodeLicInfo: string
+    phpCodeLicCode: string
   }
 }
 
@@ -82,6 +91,7 @@ export interface UpdateCodeValidation {
   parsedData?: {
     hash: string
     days: number
+    licenseId: string
   }
 }
 
@@ -100,7 +110,7 @@ export const VALIDITY_PRESETS = [
 ] as const
 
 /**
- * Genera el string de validación para el hash bcrypt de lic_info
+ * Genera el string de validacion para el hash bcrypt de lic_info
  * Formato EXACTO compatible con PHP: {fecha}-{dias}-{nombre}
  * Este es el formato que usa password_verify() en PHP
  */
@@ -113,15 +123,19 @@ export function generateValidationString(
 }
 
 /**
- * Genera el string de validación para el hash bcrypt de lic_code
- * Formato: solo los dias (se hashea el numero de dias)
+ * Genera el string de validacion para el hash bcrypt de lic_code
+ * Formato: {license_id}-{dias}
+ * Vincula el codigo de actualizacion con una licencia especifica
  */
-export function generateUpdateCodeValidationString(validityDays: number): string {
-  return `${validityDays}`
+export function generateUpdateCodeValidationString(
+  licenseId: string,
+  validityDays: number
+): string {
+  return `${licenseId}-${validityDays}`
 }
 
 /**
- * Calcula la fecha de expiración de forma precisa
+ * Calcula la fecha de expiracion de forma precisa
  */
 export function calculateExpirationDate(activationDate: string, validityDays: number): Date {
   const date = new Date(activationDate + "T00:00:00Z")
@@ -182,7 +196,9 @@ export function daysToYearsMonthsDays(days: number): {
  * Genera una licencia completa compatible con el sistema BITSELL
  * 
  * FORMATO lic_info: {hash_bcrypt}@{license_id}@{fecha_activacion}@{dias_validez}@{nombre}
- * FORMATO lic_code: {hash_bcrypt}@{dias_validez}
+ * FORMATO lic_code: {hash_bcrypt}@{license_id}@{dias_validez}
+ * 
+ * IMPORTANTE: Ambos estan vinculados por license_id y dias para garantizar consistencia
  */
 export async function generateLicense(data: LicenseData): Promise<GeneratedLicense> {
   const { licenseId, ownerName, validityDays, activationDate } = data
@@ -203,14 +219,17 @@ export async function generateLicense(data: LicenseData): Promise<GeneratedLicen
   const hashString = await bcrypt.hash(licInfoValidationString, 10)
   
   // === GENERAR HASH PARA lic_code ===
-  // Este hash se usa para actualizar la licencia (renovacion)
-  // El hash se genera sobre el string de validacion completo para que sea verificable
-  const licCodeValidationString = generateUpdateCodeValidationString(validityDays)
+  // Formato: {license_id}-{dias}
+  // Vinculado con la licencia especifica para garantizar consistencia
+  const licCodeValidationString = generateUpdateCodeValidationString(licenseId, validityDays)
   const updateCodeHash = await bcrypt.hash(licCodeValidationString, 10)
   
   // Formatear las claves
+  // lic_info: {hash}@{license_id}@{fecha}@{dias}@{nombre}
   const fullLicenseKey = `${hashString}@${licenseId}@${activationDate}@${validityDays}@${ownerName}`
-  const updateCode = `${updateCodeHash}@${validityDays}`
+  
+  // lic_code: {hash}@{license_id}@{dias}
+  const updateCode = `${updateCodeHash}@${licenseId}@${validityDays}`
   
   // Calcular fechas de expiracion
   const expirationDateObj = calculateExpirationDate(activationDate, validityDays)
@@ -219,13 +238,38 @@ export async function generateLicense(data: LicenseData): Promise<GeneratedLicen
   // Calcular dias desde hoy
   const today = new Date()
   today.setUTCHours(0, 0, 0, 0)
-  const activationDateObj = new Date(activationDate + "T00:00:00Z")
   const daysFromToday = daysBetween(today, expirationDateObj)
   const isActiveFromToday = daysFromToday > 0
   
   // Formatear validez
   const { formatted: formattedValidity } = daysToYearsMonthsDays(validityDays)
   
+  // Generar codigo PHP de verificacion
+  const phpCodeLicInfo = `<?php
+// Verificar lic_info
+$fecha = '${activationDate}';
+$dias = ${validityDays};
+$nombre = '${ownerName.replace(/'/g, "\\'")}';
+$hash = '${hashString}';
+
+$validationString = "$fecha-$dias-$nombre";
+$isValid = password_verify($validationString, $hash);
+
+echo $isValid ? "LICENCIA VALIDA" : "LICENCIA INVALIDA";
+?>`
+
+  const phpCodeLicCode = `<?php
+// Verificar lic_code
+$license_id = '${licenseId}';
+$dias = ${validityDays};
+$hash = '${updateCodeHash}';
+
+$validationString = "$license_id-$dias";
+$isValid = password_verify($validationString, $hash);
+
+echo $isValid ? "CODIGO VALIDO" : "CODIGO INVALIDO";
+?>`
+
   return {
     licenseId,
     ownerName,
@@ -246,7 +290,8 @@ export async function generateLicense(data: LicenseData): Promise<GeneratedLicen
     licCodeData: {
       id: 1,
       code: updateCodeHash,
-      qty: validityDays
+      qty: validityDays,
+      license_id: licenseId
     },
     expirationInfo: {
       expirationDate,
@@ -255,6 +300,12 @@ export async function generateLicense(data: LicenseData): Promise<GeneratedLicen
       daysFromToday,
       isActiveFromToday,
       formattedValidity
+    },
+    phpVerification: {
+      licInfoValidationString,
+      licCodeValidationString,
+      phpCodeLicInfo,
+      phpCodeLicCode
     }
   }
 }
@@ -289,24 +340,24 @@ export function parseLicenseKey(licenseKey: string): ValidationResult["parsedDat
 
 /**
  * Parsea un codigo de actualizacion (lic_code)
- * FORMATO: {hash}@{dias}
+ * FORMATO: {hash}@{license_id}@{dias}
  */
 export function parseUpdateCode(code: string): UpdateCodeValidation["parsedData"] | null {
   const trimmedCode = code.trim()
   const parts = trimmedCode.split("@")
   
-  if (parts.length !== 2) {
+  if (parts.length !== 3) {
     return null
   }
   
-  const [hash, daysStr] = parts
+  const [hash, licenseId, daysStr] = parts
   const days = parseInt(daysStr, 10)
   
-  if (!hash || isNaN(days) || days <= 0) {
+  if (!hash || !licenseId || isNaN(days) || days <= 0) {
     return null
   }
   
-  return { hash, days }
+  return { hash, days, licenseId }
 }
 
 /**
@@ -318,14 +369,14 @@ export async function validateUpdateCode(code: string): Promise<UpdateCodeValida
   if (!parsedData) {
     return {
       isValid: false,
-      message: "Formato de codigo invalido. Debe ser: {hash}@{dias}"
+      message: "Formato de codigo invalido. Debe ser: {hash}@{license_id}@{dias}"
     }
   }
   
-  const { hash, days } = parsedData
+  const { hash, days, licenseId } = parsedData
   
-  // Verificar hash
-  const validationString = generateUpdateCodeValidationString(days)
+  // Verificar hash usando el formato correcto: {license_id}-{dias}
+  const validationString = generateUpdateCodeValidationString(licenseId, days)
   
   try {
     const isHashValid = await bcrypt.compare(validationString, hash)
@@ -340,7 +391,7 @@ export async function validateUpdateCode(code: string): Promise<UpdateCodeValida
     
     return {
       isValid: true,
-      message: `Codigo valido para ${days} dias de extension`,
+      message: `Codigo valido para licencia ${licenseId} con ${days} dias de extension`,
       parsedData
     }
   } catch {
@@ -392,7 +443,7 @@ export async function validateLicense(licenseKey: string): Promise<ValidationRes
     }
   }
   
-  // Verificar hash
+  // Verificar hash usando el formato correcto: {fecha}-{dias}-{nombre}
   const validationString = generateValidationString(activationDate, validityDays, ownerName)
   
   let isHashValid = false
@@ -427,7 +478,7 @@ export async function validateLicense(licenseKey: string): Promise<ValidationRes
   // Dias usados desde la activacion
   const daysUsed = Math.max(0, daysBetween(activationDateObj, today))
   
-  // Dias restantes (puede ser negativo si expiró)
+  // Dias restantes (puede ser negativo si expiro)
   const daysRemaining = daysBetween(today, expirationDateObj)
   
   // Porcentaje usado
@@ -486,21 +537,25 @@ export async function validateLicense(licenseKey: string): Promise<ValidationRes
 
 /**
  * Genera SQL para las tablas lic_info y lic_code
+ * Ambas tablas estan vinculadas por license_id para garantizar consistencia
  */
 export function generateSQL(license: GeneratedLicense): {
   licInfo: string
   licCode: string
   combined: string
 } {
-  const { licInfoData, licCodeData, expirationInfo } = license
+  const { licInfoData, licCodeData, expirationInfo, phpVerification } = license
   const escapedOwner = licInfoData.owner.replace(/'/g, "''")
   const timestamp = new Date().toISOString()
   
   const licInfoSQL = `-- ============================================
 -- SQL para tabla lic_info (Licencia Principal)
 -- Generado: ${timestamp}
+-- License ID: ${licInfoData.license_id}
 -- Expira: ${expirationInfo.expirationDate}
 -- Validez: ${expirationInfo.formattedValidity}
+-- ============================================
+-- String de validacion PHP: ${phpVerification.licInfoValidationString}
 -- ============================================
 
 -- INSERTAR nueva licencia
@@ -527,28 +582,37 @@ WHERE id = ${licInfoData.id};`
   const licCodeSQL = `-- ============================================
 -- SQL para tabla lic_code (Codigo de Actualizacion)
 -- Generado: ${timestamp}
+-- License ID: ${licCodeData.license_id}
 -- Dias: ${licCodeData.qty}
+-- ============================================
+-- String de validacion PHP: ${phpVerification.licCodeValidationString}
 -- ============================================
 
 -- INSERTAR nuevo codigo
-INSERT INTO lic_code (id, code, qty)
-VALUES (${licCodeData.id}, '${licCodeData.code}', ${licCodeData.qty});
+INSERT INTO lic_code (id, code, qty, license_id)
+VALUES (${licCodeData.id}, '${licCodeData.code}', ${licCodeData.qty}, '${licCodeData.license_id}');
 
 -- ACTUALIZAR codigo existente
 UPDATE lic_code SET
   code = '${licCodeData.code}',
   qty = ${licCodeData.qty},
+  license_id = '${licCodeData.license_id}',
   updated_at = CURRENT_TIMESTAMP
 WHERE id = ${licCodeData.id};`
 
   const combinedSQL = `-- ============================================
 -- SQL COMPLETO - BITSELL POS License System
 -- Generado: ${timestamp}
+-- ============================================
 -- License ID: ${licInfoData.license_id}
 -- Owner: ${escapedOwner}
 -- Activacion: ${licInfoData.init}
 -- Validez: ${licInfoData.qty} dias (${expirationInfo.formattedValidity})
 -- Expira: ${expirationInfo.expirationDate}
+-- ============================================
+-- VERIFICACION PHP:
+-- lic_info: password_verify("${phpVerification.licInfoValidationString}", $hash)
+-- lic_code: password_verify("${phpVerification.licCodeValidationString}", $hash)
 -- ============================================
 
 -- =====================
@@ -573,11 +637,12 @@ ON DUPLICATE KEY UPDATE
 -- =====================
 -- TABLA: lic_code
 -- =====================
-INSERT INTO lic_code (id, code, qty)
-VALUES (${licCodeData.id}, '${licCodeData.code}', ${licCodeData.qty})
+INSERT INTO lic_code (id, code, qty, license_id)
+VALUES (${licCodeData.id}, '${licCodeData.code}', ${licCodeData.qty}, '${licCodeData.license_id}')
 ON DUPLICATE KEY UPDATE
   code = VALUES(code),
-  qty = VALUES(qty);`
+  qty = VALUES(qty),
+  license_id = VALUES(license_id);`
 
   return {
     licInfo: licInfoSQL,
