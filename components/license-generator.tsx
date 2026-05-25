@@ -34,6 +34,7 @@ interface GeneratedLicense {
     id: number
     code: string
     qty: number
+    license_id: string
   }
   expirationInfo: {
     expirationDate: string
@@ -42,6 +43,12 @@ interface GeneratedLicense {
     daysFromToday: number
     isActiveFromToday: boolean
     formattedValidity: string
+  }
+  phpVerification?: {
+    licInfoValidationString: string
+    licCodeValidationString: string
+    phpCodeLicInfo: string
+    phpCodeLicCode: string
   }
 }
 
@@ -302,13 +309,16 @@ export default function LicenseGenerator() {
 
   // Generar SQL statements
   const generateLicInfoSQL = (license: GeneratedLicense) => {
-    const { licInfoData, expirationInfo } = license
+    const { licInfoData, expirationInfo, phpVerification } = license
     const escapedOwner = licInfoData.owner.replace(/'/g, "''")
     return `-- ============================================
 -- SQL para tabla lic_info (Licencia Principal)
 -- Generado: ${new Date().toISOString()}
+-- License ID: ${licInfoData.license_id}
 -- Expira: ${expirationInfo.expirationDate}
 -- Validez: ${expirationInfo.formattedValidity}
+-- ============================================
+-- String de validacion PHP: ${phpVerification?.licInfoValidationString || `${licInfoData.init}-${licInfoData.qty}-${licInfoData.owner}`}
 -- ============================================
 
 -- INSERTAR nueva licencia
@@ -334,27 +344,31 @@ WHERE id = ${licInfoData.id};`
   }
 
   const generateLicCodeSQL = (license: GeneratedLicense) => {
-    const { licCodeData } = license
+    const { licCodeData, phpVerification } = license
     return `-- ============================================
 -- SQL para tabla lic_code (Codigo de Actualizacion)
 -- Generado: ${new Date().toISOString()}
+-- License ID: ${licCodeData.license_id}
 -- Dias: ${licCodeData.qty}
+-- ============================================
+-- String de validacion PHP: ${phpVerification?.licCodeValidationString || `${licCodeData.license_id}-${licCodeData.qty}`}
 -- ============================================
 
 -- INSERTAR nuevo codigo
-INSERT INTO lic_code (id, code, qty)
-VALUES (${licCodeData.id}, '${licCodeData.code}', ${licCodeData.qty});
+INSERT INTO lic_code (id, code, qty, license_id)
+VALUES (${licCodeData.id}, '${licCodeData.code}', ${licCodeData.qty}, '${licCodeData.license_id}');
 
 -- ACTUALIZAR codigo existente (alternativa)
 UPDATE lic_code SET
   code = '${licCodeData.code}',
   qty = ${licCodeData.qty},
+  license_id = '${licCodeData.license_id}',
   updated_at = CURRENT_TIMESTAMP
 WHERE id = ${licCodeData.id};`
   }
 
   const generateCombinedSQL = (license: GeneratedLicense) => {
-    const { licInfoData, licCodeData, expirationInfo } = license
+    const { licInfoData, licCodeData, expirationInfo, phpVerification } = license
     const escapedOwner = licInfoData.owner.replace(/'/g, "''")
     return `-- ============================================
 -- SQL COMPLETO - BITSELL POS License System
@@ -365,6 +379,10 @@ WHERE id = ${licCodeData.id};`
 -- Activacion: ${licInfoData.init}
 -- Validez: ${licInfoData.qty} dias (${expirationInfo.formattedValidity})
 -- Expira: ${expirationInfo.expirationDate}
+-- ============================================
+-- VERIFICACION PHP:
+-- lic_info: password_verify("${phpVerification?.licInfoValidationString || `${licInfoData.init}-${licInfoData.qty}-${licInfoData.owner}`}", $hash)
+-- lic_code: password_verify("${phpVerification?.licCodeValidationString || `${licCodeData.license_id}-${licCodeData.qty}`}", $hash)
 -- ============================================
 
 -- =====================
@@ -389,11 +407,12 @@ ON DUPLICATE KEY UPDATE
 -- =====================
 -- TABLA: lic_code
 -- =====================
-INSERT INTO lic_code (id, code, qty)
-VALUES (${licCodeData.id}, '${licCodeData.code}', ${licCodeData.qty})
+INSERT INTO lic_code (id, code, qty, license_id)
+VALUES (${licCodeData.id}, '${licCodeData.code}', ${licCodeData.qty}, '${licCodeData.license_id}')
 ON DUPLICATE KEY UPDATE
   code = VALUES(code),
-  qty = VALUES(qty);`
+  qty = VALUES(qty),
+  license_id = VALUES(license_id);`
   }
 
   return (
